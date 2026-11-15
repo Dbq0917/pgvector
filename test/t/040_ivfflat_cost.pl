@@ -47,4 +47,27 @@ for my $dim (@dims)
 	$node->safe_psql("postgres", "DROP TABLE tst;");
 }
 
+# Test default selectivity with limit
+my $array_sql = join(",", ('random()') x 384);
+
+$node->safe_psql("postgres", "CREATE TABLE tst2 (i int4, c int4, v vector(384));");
+$node->safe_psql("postgres",
+	"INSERT INTO tst2 SELECT i, i % 1000, ARRAY[$array_sql] FROM generate_series(1, 20000) i;"
+);
+$node->safe_psql("postgres", "CREATE INDEX idx2 ON tst2 USING ivfflat (v vector_l2_ops) WITH (lists = 100);");
+$node->safe_psql("postgres", "CREATE INDEX c_idx ON tst2 (c);");
+$node->safe_psql("postgres", "ANALYZE tst2;");
+
+my @r = ();
+for (1 .. 384)
+{
+	push(@r, rand());
+}
+my $query = "[" . join(",", @r) . "]";
+
+my $explain = $node->safe_psql("postgres", qq(
+	EXPLAIN ANALYZE SELECT i FROM tst2 WHERE c = ANY (ARRAY(SELECT i FROM generate_series(1, 100) i)) AND vector_norm(v) > 0 ORDER BY v <-> '$query' LIMIT $limit;
+));
+like($explain, qr/Index Scan using idx2/);
+
 done_testing();

@@ -89,6 +89,25 @@ ivfflatbuildphasename(int64 phasenum)
 }
 
 /*
+ * Check whether any restriction uses the default inequality selectivity
+ */
+static bool
+ivfflathasdefaultselectivity(IndexOptInfo *indexInfo)
+{
+	ListCell   *lc;
+
+	foreach(lc, indexInfo->indrestrictinfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+		if (rinfo->norm_selec == (Selectivity) DEFAULT_INEQ_SEL)
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * Estimate the cost of an index scan
  */
 static void
@@ -99,6 +118,7 @@ ivfflatcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 {
 	IndexOptInfo *indexInfo = path->indexinfo;
 	GenericCosts costs = {0};
+	bool		hasDefaultSelectivity;
 	int			lists;
 	double		ratio;
 	double		sequentialRatio = 0.5;
@@ -121,6 +141,8 @@ ivfflatcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	}
 
 	genericcostestimate(root, path, loop_count, &costs);
+
+	hasDefaultSelectivity = ivfflathasdefaultselectivity(indexInfo);
 
 	/* Get lists */
 	if (!indexInfo->hypothetical)
@@ -161,6 +183,20 @@ ivfflatcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	*indexStartupCost = costs.indexStartupCost;
 	*indexTotalCost = costs.indexTotalCost;
 	*indexSelectivity = costs.indexSelectivity;
+
+	/*
+	 * When PostgreSQL lacks statistics for a restriction, it uses
+	 * DEFAULT_INEQ_SEL. This is common for distance filters and expressions.
+	 * An ordered ANN scan can stop after enough tuples have been returned, so
+	 * do not charge for scanning all lists when a LIMIT is present.
+	 */
+	if (hasDefaultSelectivity && loop_count <= 1 && ratio < 1 &&
+		root->limit_tuples > 0 && root->limit_tuples < indexInfo->tuples)
+	{
+		*indexTotalCost = *indexStartupCost;
+		*indexSelectivity = Min(*indexSelectivity, root->limit_tuples / indexInfo->tuples);
+	}
+
 	*indexCorrelation = costs.indexCorrelation;
 	*indexPages = costs.numIndexPages;
 }
